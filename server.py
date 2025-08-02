@@ -17,10 +17,10 @@ class Connect4GameServer:
         self.player_assignments = {}  # Track player number assignments per room: {room_name: {username: player_number}}
         self.game_boards = {}  # Track game board state per room
         self.current_turns = {}  # Track whose turn it is per room
+        self.running = True  # <-- Added control flag
         self.init_server()
 
     def init_server(self):
-        """Initialize the server socket and start listening for connections."""
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -32,18 +32,25 @@ class Connect4GameServer:
             print(f"❌ Error starting server: {e}")
             sys.exit(1)
 
-        # Start accepting client connections
         threading.Thread(target=self.accept_connections).start()
 
     def accept_connections(self):
-        """Accept incoming client connections in a separate thread."""
-        while True:
+        while self.running:
             try:
                 client_socket, addr = self.server_socket.accept()
                 print(f"🌐 New player connection from {addr}")
                 threading.Thread(target=self.handle_client, args=(client_socket, addr)).start()
+            except OSError:
+                break  # <-- Expected when socket is closed
             except Exception as e:
                 print(f"❌ Error accepting connection: {e}")
+
+    def shutdown(self):
+        self.running = False
+        if self.server_socket:
+            self.server_socket.close()
+        print("🔒 Server socket closed.")
+
 
     def assign_random_players(self, room_name):
         """Randomly assign player numbers (1 or 2) to players in the room."""
