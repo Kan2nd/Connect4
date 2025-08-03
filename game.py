@@ -1,253 +1,420 @@
-import pygame
 import sys
 import pickle
-import threading
-import socket
-from enum import Enum
-import math
-import random
+import time
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QMainWindow, QMessageBox
+from PyQt5.QtCore import Qt, QEvent, QCoreApplication
+from PyQt5.QtGui import QFont
 
-# Initialize Pygame
-pygame.init()
+class GameMessageEvent(QEvent):
+    """Custom event for passing game messages to the main thread"""
+    EventType = QEvent.Type(QEvent.registerEventType())
+    def __init__(self, message_type, data):
+        super().__init__(self.EventType)
+        self.message_type = message_type
+        self.data = data
 
-# Constants
-BOARD_WIDTH = 7
-BOARD_HEIGHT = 7
-CELL_SIZE = 80
-BOARD_OFFSET_X = 50
-BOARD_OFFSET_Y = 150
-WINDOW_WIDTH = BOARD_WIDTH * CELL_SIZE + 2 * BOARD_OFFSET_X
-WINDOW_HEIGHT = BOARD_HEIGHT * CELL_SIZE + 2 * BOARD_OFFSET_Y + 100
-
-# Colors (Dark Theme)
-DARK_BG = (25, 25, 35)
-DARKER_BG = (18, 18, 25)
-BOARD_COLOR = (45, 50, 65)
-EMPTY_CELL = (60, 65, 80)
-PLAYER1_COLOR = (220, 50, 50)  # Red
-PLAYER2_COLOR = (255, 215, 0)  # Gold
-HOVER_COLOR = (100, 110, 130)
-TEXT_COLOR = (230, 230, 240)
-SUCCESS_COLOR = (50, 200, 50)
-ERROR_COLOR = (200, 50, 50)
-BORDER_COLOR = (80, 85, 100)
-
-# Fonts
-font_large = pygame.font.Font(None, 48)
-font_medium = pygame.font.Font(None, 36)
-font_small = pygame.font.Font(None, 24)
-
-class GameState(Enum):
-    WAITING = 1
-    PLAYING = 2
-    GAME_OVER = 3
-
-class Connect4Game:
-    def __init__(self, client_socket, username, list_of_users_in_room, room_name, player_assignment=None):
+class NetworkedConnect4Game(QMainWindow):
+    def __init__(self, client_socket, username, players_list, room_name, player_assignment):
+        super().__init__()
         self.client_socket = client_socket
         self.username = username
-        self.list_of_users_in_room = list_of_users_in_room
+        self.players_list = players_list
         self.room_name = room_name
-        self.running = True
+        self.player_assignment = player_assignment
         
         # Game state
-        self.board = [[0 for _ in range(BOARD_WIDTH)] for _ in range(BOARD_HEIGHT)]
-        self.current_player = 1
-        self.game_state = GameState.PLAYING  # Start in playing state since game was started from lobby
+        self.board = [[0 for _ in range(7)] for _ in range(6)]
+        self.current_player = 1  # 1 for Player 1 (Red), 2 for Player 2 (Yellow)
+        self.game_over = False
         self.winner = None
-        self.hover_col = -1
         
-        # Player mapping - Use server assignment or fallback to index-based
-        if player_assignment:
-            self.player_number = player_assignment.get(self.username, 1)
-            print(f"Server assigned player number: {self.player_number}")
+        # Determine my player number and if it's my turn
+        self.my_player_number = player_assignment.get(username, 1)
+        self.is_my_turn = (self.my_player_number == self.current_player)
+        
+        print(f"Starting Connect 4 game for {username}")
+        print(f"Player assignment: {player_assignment}")
+        print(f"My player number: {self.my_player_number}")
+        print(f"Players: {players_list}")
+        
+        self.init_ui()
+        
+        # Start receiving game messages in background
+        import threading
+        threading.Thread(target=self.receive_game_messages, daemon=True).start()
+
+    def init_ui(self):
+        self.setWindowTitle(f"🔴 Connect 4 - {self.room_name}")
+        self.setGeometry(300, 100, 600, 700)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Dark theme
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QWidget {
+                background-color: #2b2b2b;
+            }
+        """)
+        
+        # Title
+        title_label = QLabel(f"🔴 Connect 4 Game 🟡 - Room: {self.room_name}")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setFont(QFont("Arial", 20, QFont.Bold))
+        title_label.setStyleSheet("color: #ffffff; margin: 20px;")
+        main_layout.addWidget(title_label)
+        
+        # Player info
+        player_info = QLabel(self.get_player_info_text())
+        player_info.setAlignment(Qt.AlignCenter)
+        player_info.setFont(QFont("Arial", 14))
+        player_info.setStyleSheet("color: #cccccc; margin: 10px;")
+        main_layout.addWidget(player_info)
+        
+        # Game status
+        self.status_label = QLabel(self.get_turn_text())
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setFont(QFont("Arial", 18, QFont.Bold))
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                background-color: #3c3f41;
+                border-radius: 10px;
+                padding: 15px;
+                margin: 10px;
+            }
+        """)
+        main_layout.addWidget(self.status_label)
+        
+        # Game board
+        board_widget = QWidget()
+        board_widget.setFixedSize(490, 420)
+        board_widget.setStyleSheet("""
+            QWidget {
+                background-color: #1e4d72;
+                border: 3px solid #ffffff;
+                border-radius: 15px;
+            }
+        """)
+        main_layout.addWidget(board_widget, alignment=Qt.AlignCenter)
+        
+        # Create board buttons
+        self.board_buttons = []
+        for row in range(6):
+            button_row = []
+            for col in range(7):
+                btn = QPushButton()
+                btn.setFixedSize(60, 60)
+                btn.move(15 + col * 70, 15 + row * 70)
+                btn.setParent(board_widget)
+                btn.setEnabled(False)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #ffffff;
+                        border: 2px solid #333333;
+                        border-radius: 25px;
+                    }
+                """)
+                btn.show()
+                button_row.append(btn)
+            self.board_buttons.append(button_row)
+        
+        # Column buttons for making moves
+        column_layout = QHBoxLayout()
+        self.column_buttons = []
+        for i in range(7):
+            btn = QPushButton(f"Drop\nCol {i+1}")
+            btn.setFixedSize(70, 50)
+            btn.clicked.connect(lambda checked, col=i: self.make_move(col))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e90ff;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #4682b4;
+                }
+                QPushButton:pressed {
+                    background-color: #1c86ee;
+                }
+                QPushButton:disabled {
+                    background-color: #666666;
+                }
+            """)
+            self.column_buttons.append(btn)
+            column_layout.addWidget(btn)
+        
+        main_layout.addLayout(column_layout)
+        
+        # Control buttons
+        control_layout = QHBoxLayout()
+        
+        self.restart_button = QPushButton("🔄 Play Again")
+        self.restart_button.clicked.connect(self.request_restart)
+        self.restart_button.setFixedSize(140, 40)
+        self.restart_button.setEnabled(False)  # Only enabled when game ends
+        self.restart_button.setStyleSheet("""
+            QPushButton {
+                background-color: #228B22;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #32CD32;
+            }
+            QPushButton:disabled {
+                background-color: #666666;
+            }
+        """)
+        control_layout.addWidget(self.restart_button)
+        
+        self.leave_button = QPushButton("🚪 Leave Game")
+        self.leave_button.clicked.connect(self.leave_game)
+        self.leave_button.setFixedSize(140, 40)
+        self.leave_button.setStyleSheet("""
+            QPushButton {
+                background-color: #DC143C;
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        control_layout.addWidget(self.leave_button)
+        
+        main_layout.addLayout(control_layout)
+        
+        # Instructions
+        instructions = QLabel("Click column buttons to drop pieces. Get 4 in a row to win!")
+        instructions.setAlignment(Qt.AlignCenter)
+        instructions.setStyleSheet("""
+            QLabel {
+                color: #cccccc;
+                font-size: 14px;
+                margin: 10px;
+            }
+        """)
+        main_layout.addWidget(instructions)
+        
+        # Update button states based on turn
+        self.update_button_states()
+
+    def get_player_info_text(self):
+        """Get player information text"""
+        player_names = []
+        for username in self.players_list:
+            player_num = self.player_assignment.get(username, 1)
+            color = "🔴" if player_num == 1 else "🟡"
+            if username == self.username:
+                player_names.append(f"Player {player_num}: {username} (You) {color}")
+            else:
+                player_names.append(f"Player {player_num}: {username} {color}")
+        return " vs ".join(player_names)
+
+    def get_turn_text(self):
+        """Get turn information text"""
+        if self.game_over:
+            if self.winner:
+                winner_username = self.get_username_by_player(self.winner)
+                if winner_username == self.username:
+                    return "🎉 You Win! 🎉"
+                else:
+                    return f"🎉 {winner_username} Wins! 🎉"
+            else:
+                return "🤝 It's a Draw! 🤝"
         else:
-            self.player_number = self.get_player_number()
-            print(f"Fallback player number: {self.player_number}")
-        
-        self.opponent = self.get_opponent()
-        
-        # UI elements
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption(f"Connect 4 - {room_name}")
-        self.clock = pygame.time.Clock()
-        
-        # Messages
-        self.status_message = f"Game Started! Player 1 goes first"
-        self.message_timer = 180
-        
-        # Animation
-        self.dropping_piece = None  # (col, row, color, y_pos)
-        self.drop_speed = 8
-        
-        print(f"Connect 4 initialized for {username} (Player {self.player_number}) in room {room_name}")
-        print(f"Opponent: {self.opponent}")
-        
-        # Start message receiver thread
-        threading.Thread(target=self.receive_messages, daemon=True).start()
+            current_username = self.get_username_by_player(self.current_player)
+            player_color = "🔴" if self.current_player == 1 else "🟡"
+            if current_username == self.username:
+                return f"Your Turn {player_color}"
+            else:
+                return f"{current_username}'s Turn {player_color}"
 
-    def get_player_number(self):
-        """Determine which player number this client is (1 or 2)"""
-        try:
-            return self.list_of_users_in_room.index(self.username) + 1
-        except (ValueError, AttributeError):
-            return 1
+    def get_username_by_player(self, player_num):
+        """Get username for a player number"""
+        for username, pnum in self.player_assignment.items():
+            if pnum == player_num:
+                return username
+        return "Unknown"
 
-    def get_opponent(self):
-        """Get opponent's username"""
-        if not self.list_of_users_in_room:
-            return None
-        for user in self.list_of_users_in_room:
-            if user != self.username:
-                return user
-        return None
-
-    def receive_messages(self):
-        """Receive messages from server in separate thread"""
-        while self.running:
-            try:
-                data = self.client_socket.recv(1048576)
-                if not data:
-                    break
-                message = pickle.loads(data)
-                self.handle_server_message(message)
-            except Exception as e:
-                print(f"Error receiving message: {e}")
+    def make_move(self, column):
+        """Make a move in the specified column"""
+        if self.game_over:
+            return
+            
+        if not self.is_my_turn:
+            QMessageBox.information(self, "Not Your Turn", "Please wait for your turn!")
+            return
+            
+        if column < 0 or column >= 7:
+            return
+            
+        # Check if column is full locally first
+        if self.board[0][column] != 0:
+            QMessageBox.information(self, "Invalid Move", "Column is full!")
+            return
+        
+        # Find the lowest available row in the column
+        row = -1
+        for r in range(5, -1, -1):
+            if self.board[r][column] == 0:
+                row = r
                 break
-
-    def handle_server_message(self, message):
-        """Handle messages from server"""
-        command = message.get("Command", "")
+                
+        if row == -1:
+            QMessageBox.information(self, "Invalid Move", "Column is full!")
+            return
         
-        if command == "game_move":
-            col = message["col"]
-            player = message["player"]
-            move_username = message["username"]
-            
-            # Always apply moves from server (server is the authority)
-            print(f"Applying server move: column {col}, player {player} from {move_username}")
-            self.make_move(col, player, from_server=True)
-            
-        elif command == "game_start":
-            self.game_state = GameState.PLAYING
-            self.current_player = 1
-            if len(self.list_of_users_in_room) >= 2:
-                self.status_message = f"Game Started! Player 1 ({self.list_of_users_in_room[0]}) goes first"
-            else:
-                self.status_message = "Game Started! Player 1 goes first"
-            self.message_timer = 180
-            
-        elif command == "game_reset":
-            self.reset_game()
-            
-        elif command == "player_disconnect":
-            disconnected_player = message.get("username", "")
-            self.status_message = f"{disconnected_player} disconnected. Game ended."
-            self.game_state = GameState.GAME_OVER
-            self.message_timer = 300
-            
-        elif command == "turn_update":
-            # Server can send turn updates to synchronize game state
-            new_current_player = message.get("current_player", self.current_player)
-            self.current_player = new_current_player
-            
-            if len(self.list_of_users_in_room) >= self.current_player:
-                current_player_name = self.list_of_users_in_room[self.current_player - 1]
-                self.status_message = f"Player {self.current_player} ({current_player_name})'s turn"
-            else:
-                self.status_message = f"Player {self.current_player}'s turn"
-            self.message_timer = 120
-        elif command == "game_ended_player_left":
-            left_player = message.get("left_player", "")
-            winner = message.get("winner", "")
-            
-            if winner == self.username:
-                self.status_message = f"🎉 You win! {left_player} left the game."
-            else:
-                self.status_message = f"🚪 {left_player} left the game. {winner} wins!"
-            
-            self.game_state = GameState.GAME_OVER
-            self.winner = message.get("winner")
-            self.message_timer = 300
+        # Make the move locally FIRST
+        self.board[row][column] = self.my_player_number
         
+        # Update turn locally FIRST (switch to other player)
+        self.current_player = 2 if self.current_player == 1 else 1
+        self.is_my_turn = (self.my_player_number == self.current_player)
         
+        # Update UI immediately
+        self.update_board_display()
+        self.status_label.setText(self.get_turn_text())
+        self.update_button_states()
         
-    def send_move(self, col):
-        """Send move to server"""
-        message = {
+        # Check for win or draw
+        game_over = False
+        winner = None
+        is_draw = False
+        
+        if self.check_winner(row, column, self.my_player_number):
+            game_over = True
+            winner = self.my_player_number
+            self.game_over = True
+            self.winner = self.my_player_number
+            self.restart_button.setEnabled(True)
+            self.update_button_states()
+            QMessageBox.information(self, "Congratulations!", "🎉 You win! 🎉")
+        elif self.is_board_full():
+            game_over = True
+            is_draw = True
+            self.game_over = True
+            self.restart_button.setEnabled(True)
+            self.update_button_states()
+            QMessageBox.information(self, "Game Over", "🤝 It's a draw! 🤝")
+        
+        # Send move, turn, and board state to server
+        self.send_game_message({
             "Command": "game_move",
             "room_name": self.room_name,
             "username": self.username,
-            "col": col,
-            "player": self.player_number
-        }
-        try:
-            data = pickle.dumps(message)
-            self.client_socket.sendall(data)
-            print(f"Sent move: column {col}, player {self.player_number}")
-        except Exception as e:
-            print(f"Error sending move: {e}")
+            "col": column,
+            "row": row,  # Include the row where piece was placed
+            "player": self.my_player_number,
+            "board_array": self.board,  # Send current board state
+            "current_player": self.current_player,  # Send updated turn
+            "game_over": game_over,
+            "winner": winner,
+            "is_draw": is_draw
+        })
 
-    def send_game_reset(self):
-        """Send game reset signal to server"""
-        message = {
-            "Command": "game_reset",
-            "room_name": self.room_name,
-            "username": self.username
-        }
-        try:
-            data = pickle.dumps(message)
-            self.client_socket.sendall(data)
-        except Exception as e:
-            print(f"Error sending game reset: {e}")
-
-    def make_move(self, col, player, from_server=False):
-        """Make a move on the board"""
-        if self.game_state != GameState.PLAYING:
+    def apply_move(self, column, player):
+        """Apply a move received from server"""
+        # Find the lowest available row in the column
+        row = -1
+        for r in range(5, -1, -1):
+            if self.board[r][column] == 0:
+                row = r
+                break
+                
+        if row == -1:
+            print(f"Error: Column {column} is full!")
             return False
             
-        # Find the lowest empty row in the column
-        for row in range(BOARD_HEIGHT - 1, -1, -1):
-            if self.board[row][col] == 0:
-                self.board[row][col] = player
-                
-                # Start drop animation
-                color = PLAYER1_COLOR if player == 1 else PLAYER2_COLOR
-                self.dropping_piece = (col, row, color, 0)
-                
-                # Check for win
-                if self.check_win(row, col, player):
-                    self.winner = player
-                    self.game_state = GameState.GAME_OVER
-                    if len(self.list_of_users_in_room) >= player:
-                        winner_name = self.list_of_users_in_room[player - 1]
-                        self.status_message = f"🎉 {winner_name} wins!"
-                    else:
-                        self.status_message = f"🎉 Player {player} wins!"
-                    self.message_timer = 300
-                    return True
-                
-                # Check for draw
-                if self.is_board_full():
-                    self.game_state = GameState.GAME_OVER
-                    self.status_message = "It's a draw!"
-                    self.message_timer = 300
-                    return True
-                
-                # Switch players
-                self.current_player = 2 if self.current_player == 1 else 1
-                if len(self.list_of_users_in_room) >= self.current_player:
-                    current_player_name = self.list_of_users_in_room[self.current_player - 1]
-                    self.status_message = f"Player {self.current_player} ({current_player_name})'s turn"
-                else:
-                    self.status_message = f"Player {self.current_player}'s turn"
-                self.message_timer = 120
-                return True
+        # Make the move
+        self.board[row][column] = player
+        self.update_board_display()
+        
+        # Check for win
+        if self.check_winner(row, column, player):
+            self.game_over = True
+            self.winner = player
+            self.restart_button.setEnabled(True)
+            self.update_button_states()
+            
+            winner_username = self.get_username_by_player(player)
+            if winner_username == self.username:
+                QMessageBox.information(self, "Congratulations!", "🎉 You win! 🎉")
+            else:
+                QMessageBox.information(self, "Game Over", f"🎉 {winner_username} wins! 🎉")
+            return True
+        
+        # Check for draw
+        if self.is_board_full():
+            self.game_over = True
+            self.restart_button.setEnabled(True)
+            self.update_button_states()
+            QMessageBox.information(self, "Game Over", "🤝 It's a draw! 🤝")
+            return True
         
         return False
 
-    def check_win(self, row, col, player):
-        """Check if the current move resulted in a win"""
+    def update_turn(self, new_current_player):
+        """Update whose turn it is"""
+        self.current_player = new_current_player
+        self.is_my_turn = (self.my_player_number == self.current_player)
+        self.status_label.setText(self.get_turn_text())
+        self.update_button_states()
+
+    def update_button_states(self):
+        """Enable/disable column buttons based on game state and turn"""
+        enable_buttons = not self.game_over and self.is_my_turn
+        for btn in self.column_buttons:
+            btn.setEnabled(enable_buttons)
+
+    def update_board_display(self):
+        """Update the visual representation of the game board"""
+        for row in range(6):
+            for col in range(7):
+                btn = self.board_buttons[row][col]
+                cell_value = self.board[row][col]
+                if cell_value == 0:
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #ffffff;
+                            border: 2px solid #333333;
+                            border-radius: 25px;
+                        }
+                    """)
+                elif cell_value == 1:
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #ff4444;
+                            border: 2px solid #333333;
+                            border-radius: 25px;
+                        }
+                    """)
+                else:  # cell_value == 2
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #ffff44;
+                            border: 2px solid #333333;
+                            border-radius: 25px;
+                        }
+                    """)
+
+    def check_winner(self, row, col, player):
+        """Check if the last move resulted in a win"""
         directions = [
             (0, 1),   # Horizontal
             (1, 0),   # Vertical
@@ -255,259 +422,251 @@ class Connect4Game:
             (1, -1)   # Diagonal \
         ]
         
-        for dx, dy in directions:
-            count = 1
+        for dr, dc in directions:
+            count = 1  # Count the piece just placed
             
-            # Check positive direction
-            r, c = row + dx, col + dy
-            while 0 <= r < BOARD_HEIGHT and 0 <= c < BOARD_WIDTH and self.board[r][c] == player:
+            # Check in positive direction
+            r, c = row + dr, col + dc
+            while 0 <= r < 6 and 0 <= c < 7 and self.board[r][c] == player:
                 count += 1
-                r, c = r + dx, c + dy
-            
-            # Check negative direction
-            r, c = row - dx, col - dy
-            while 0 <= r < BOARD_HEIGHT and 0 <= c < BOARD_WIDTH and self.board[r][c] == player:
+                r, c = r + dr, c + dc
+                
+            # Check in negative direction
+            r, c = row - dr, col - dc
+            while 0 <= r < 6 and 0 <= c < 7 and self.board[r][c] == player:
                 count += 1
-                r, c = r - dx, c - dy
-            
+                r, c = r - dr, c - dc
+                
             if count >= 4:
                 return True
         
         return False
 
+    def handle_board_update(self, message):
+        """Handle board update from other player"""
+        board_array = message.get("board_array")
+        current_player = message.get("current_player")
+        game_over = message.get("game_over", False)
+        winner = message.get("winner", None)
+        is_draw = message.get("is_draw", False)
+        other_username = message.get("username")
+        col = message.get("col")
+        row = message.get("row")
+        player = message.get("player")
+        
+        # Validate the move before applying
+        if board_array:
+            # Check if the move is valid by comparing with our current board
+            temp_board = [row[:] for row in self.board]  # Copy current board
+            
+            # Apply the move to temp board
+            if row is not None and col is not None and player is not None:
+                if (0 <= row < 6 and 0 <= col < 7 and 
+                    temp_board[row][col] == 0):  # Check if spot was empty
+                    
+                    temp_board[row][col] = player
+                    
+                    # Only update if the received board matches our expected result
+                    boards_match = True
+                    for r in range(6):
+                        for c in range(7):
+                            if board_array[r][c] != temp_board[r][c]:
+                                boards_match = False
+                                break
+                        if not boards_match:
+                            break
+                    
+                    if boards_match:
+                        # Update local board with received state
+                        self.board = [row[:] for row in board_array]  # Deep copy
+                        
+                        # Update turn if provided
+                        if current_player is not None:
+                            self.current_player = current_player
+                            self.is_my_turn = (self.my_player_number == self.current_player)
+                        
+                        # Update UI
+                        self.update_board_display()
+                        self.status_label.setText(self.get_turn_text())
+                        self.update_button_states()
+                        
+                        # Handle game end
+                        if game_over:
+                            self.game_over = True
+                            self.restart_button.setEnabled(True)
+                            self.update_button_states()
+                            
+                            if winner:
+                                self.winner = winner
+                                if winner == self.my_player_number:
+                                    QMessageBox.information(self, "Congratulations!", "🎉 You win! 🎉")
+                                else:
+                                    QMessageBox.information(self, "Game Over", f"🎉 {other_username} wins! 🎉")
+                            elif is_draw:
+                                QMessageBox.information(self, "Game Over", "🤝 It's a draw! 🤝")
+                    else:
+                        print(f"⚠️ Board sync error - received board doesn't match expected state")
+                        # Request board sync from server if needed
+                        self.send_game_message({
+                            "Command": "request_board_sync",
+                            "room_name": self.room_name,
+                            "username": self.username
+                        })
+                else:
+                    print(f"⚠️ Invalid move received: row={row}, col={col}, player={player}")
+            else:
+                print("⚠️ Incomplete move data received")
+        else:
+            print("⚠️ No board data received")
+    
     def is_board_full(self):
         """Check if the board is full"""
-        return all(self.board[0][col] != 0 for col in range(BOARD_WIDTH))
-
-    def is_valid_move(self, col):
-        """Check if a move is valid"""
-        return 0 <= col < BOARD_WIDTH and self.board[0][col] == 0
+        for col in range(7):
+            if self.board[0][col] == 0:
+                return False
+        return True
 
     def reset_game(self):
         """Reset the game to initial state"""
-        self.board = [[0 for _ in range(BOARD_WIDTH)] for _ in range(BOARD_HEIGHT)]
+        self.board = [[0 for _ in range(7)] for _ in range(6)]
         self.current_player = 1
-        self.game_state = GameState.PLAYING
+        self.game_over = False
         self.winner = None
-        self.dropping_piece = None
-        self.status_message = "Game reset! Player 1 goes first"
-        self.message_timer = 120
-
-    def get_cell_center(self, row, col):
-        """Get the center coordinates of a cell"""
-        x = BOARD_OFFSET_X + col * CELL_SIZE + CELL_SIZE // 2
-        y = BOARD_OFFSET_Y + row * CELL_SIZE + CELL_SIZE // 2
-        return x, y
-
-    def get_column_from_mouse(self, mouse_x):
-        """Get column from mouse x position"""
-        if BOARD_OFFSET_X <= mouse_x <= BOARD_OFFSET_X + BOARD_WIDTH * CELL_SIZE:
-            return (mouse_x - BOARD_OFFSET_X) // CELL_SIZE
-        return -1
-
-    def draw_board(self):
-        """Draw the game board"""
-        # Draw board background
-        board_rect = pygame.Rect(
-            BOARD_OFFSET_X - 10, 
-            BOARD_OFFSET_Y - 10, 
-            BOARD_WIDTH * CELL_SIZE + 20, 
-            BOARD_HEIGHT * CELL_SIZE + 20
-        )
-        pygame.draw.rect(self.screen, BOARD_COLOR, board_rect)
-        pygame.draw.rect(self.screen, BORDER_COLOR, board_rect, 3)
+        self.is_my_turn = (self.my_player_number == 1)
         
-        # Draw cells
-        for row in range(BOARD_HEIGHT):
-            for col in range(BOARD_WIDTH):
-                x, y = self.get_cell_center(row, col)
+        # Update UI
+        self.status_label.setText(self.get_turn_text())
+        self.restart_button.setEnabled(False)
+        self.update_board_display()
+        self.update_button_states()
+
+    def request_restart(self):
+        """Request a game restart"""
+        self.send_game_message({
+            "Command": "game_reset",
+            "room_name": self.room_name,
+            "username": self.username
+        })
+
+    def leave_game(self):
+        """Leave the game and return to lobby"""
+        self.send_game_message({
+            "Command": "player_left_game",
+            "room_name": self.room_name,
+            "username": self.username
+        })
+        self.close()
+
+    def send_game_message(self, message):
+        """Send a message to the server"""
+        try:
+            data = pickle.dumps(message)
+            self.client_socket.sendall(data)
+        except Exception as e:
+            print(f"Error sending game message: {e}")
+            QMessageBox.critical(self, "Connection Error", f"Lost connection to server: {e}")
+            self.close()
+
+    def receive_game_messages(self):
+        """Receive game messages from server"""
+        while True:
+            try:
+                data = self.client_socket.recv(1048576)
+                if not data:
+                    break
+                message = pickle.loads(data)
+                if message:
+                    QCoreApplication.postEvent(self, GameMessageEvent("game_message", message))
+            except Exception as e:
+                print(f"Error receiving game message: {e}")
+                break
+
+    def customEvent(self, event):
+        """Handle custom events from the networking thread"""
+        if event.type() == GameMessageEvent.EventType:
+            if event.message_type == "game_message":
+                self.process_game_message(event.data)
+
+    def process_game_message(self, message):
+        """Process game messages from server"""
+        try:
+            command = message.get("Command", "")
+            
+            if command == "board_update" and message.get("room_name") == self.room_name:
+                # Handle board update from other player
+                self.handle_board_update(message)
                 
-                # Draw cell background
-                cell_rect = pygame.Rect(
-                    BOARD_OFFSET_X + col * CELL_SIZE + 5,
-                    BOARD_OFFSET_Y + row * CELL_SIZE + 5,
-                    CELL_SIZE - 10,
-                    CELL_SIZE - 10
-                )
+            elif command == "turn_update" and message.get("room_name") == self.room_name:
+                # Update whose turn it is
+                new_current_player = message.get("current_player")
+                if new_current_player:
+                    print(f"Turn update: Now Player {new_current_player}'s turn")
+                    self.update_turn(new_current_player)
                 
-                # Highlight hovered column
-                if col == self.hover_col and self.game_state == GameState.PLAYING and self.current_player == self.player_number:
-                    pygame.draw.rect(self.screen, HOVER_COLOR, cell_rect)
+            elif command == "game_reset" and message.get("room_name") == self.room_name:
+                # Reset the game
+                username = message.get("username")
+                print(f"Game reset by {username}")
+                self.reset_game()
+                QMessageBox.information(self, "Game Reset", f"Game reset by {username}")
+                
+            elif command == "game_won" and message.get("room_name") == self.room_name:
+                # Handle game won
+                winner_player = message.get("winner")
+                winner_username = message.get("winner_username")
+                if winner_player:
+                    self.game_over = True
+                    self.winner = winner_player
+                    self.restart_button.setEnabled(True)
+                    self.update_button_states()
+                    self.status_label.setText(self.get_turn_text())
+                
+            elif command == "game_draw" and message.get("room_name") == self.room_name:
+                # Handle game draw
+                self.game_over = True
+                self.winner = None
+                self.restart_button.setEnabled(True)
+                self.update_button_states()
+                self.status_label.setText(self.get_turn_text())
+                
+            elif command == "game_ended_player_left" and message.get("room_name") == self.room_name:
+                # Handle player leaving mid-game
+                left_player = message.get("left_player", "")
+                winner = message.get("winner", "")
+                
+                if winner == self.username:
+                    QMessageBox.information(self, "You Win!", f"🎉 You win! {left_player} left the game.")
                 else:
-                    pygame.draw.rect(self.screen, EMPTY_CELL, cell_rect)
+                    QMessageBox.information(self, "Player Left", f"🚪 {left_player} left the game.")
                 
-                pygame.draw.rect(self.screen, BORDER_COLOR, cell_rect, 2)
+                self.close()  # Return to lobby
                 
-                # Draw piece if present
-                if self.board[row][col] != 0:
-                    color = PLAYER1_COLOR if self.board[row][col] == 1 else PLAYER2_COLOR
-                    pygame.draw.circle(self.screen, color, (x, y), CELL_SIZE // 2 - 15)
-                    pygame.draw.circle(self.screen, BORDER_COLOR, (x, y), CELL_SIZE // 2 - 15, 3)
+        except Exception as e:
+            print(f"Error processing game message: {e}")
 
-    def draw_dropping_piece(self):
-        """Draw animated dropping piece"""
-        if self.dropping_piece:
-            col, target_row, color, y_pos = self.dropping_piece
-            
-            # Calculate target position
-            target_y = BOARD_OFFSET_Y + target_row * CELL_SIZE + CELL_SIZE // 2
-            start_y = BOARD_OFFSET_Y - CELL_SIZE // 2
-            
-            # Update animation
-            if y_pos < target_y - start_y:
-                y_pos += self.drop_speed
-                self.drop_speed += 0.5  # Gravity effect
-            else:
-                # Animation finished
-                self.dropping_piece = None
-                self.drop_speed = 8
-                return
-            
-            # Draw the piece
-            x = BOARD_OFFSET_X + col * CELL_SIZE + CELL_SIZE // 2
-            actual_y = start_y + y_pos
-            pygame.draw.circle(self.screen, color, (int(x), int(actual_y)), CELL_SIZE // 2 - 15)
-            pygame.draw.circle(self.screen, BORDER_COLOR, (int(x), int(actual_y)), CELL_SIZE // 2 - 15, 3)
-            
-            # Update the animation
-            self.dropping_piece = (col, target_row, color, y_pos)
+    def closeEvent(self, event):
+        """Handle window close event"""
+        # Only send leave message if game is still active
+        if not self.game_over:
+            try:
+                self.send_game_message({
+                    "Command": "player_left_game",
+                    "room_name": self.room_name,
+                    "username": self.username
+                })
+            except:
+                pass
+        event.accept()
 
-    def draw_ui(self):
-        """Draw UI elements"""
-        # Title
-        title_text = font_large.render(f"Connect 4 - {self.room_name}", True, TEXT_COLOR)
-        title_rect = title_text.get_rect(center=(WINDOW_WIDTH // 2, 30))
-        self.screen.blit(title_text, title_rect)
-        
-        # Player info
-        y_offset = 70
-        for i, player_name in enumerate(self.list_of_users_in_room[:2]):  # Only show first 2 players
-            player_num = i + 1
-            color = PLAYER1_COLOR if player_num == 1 else PLAYER2_COLOR
-            
-            # Player indicator
-            indicator_text = f"Player {player_num}: {player_name}"
-            if player_name == self.username:
-                indicator_text += " (You)"
-            
-            # Highlight current player
-            if self.current_player == player_num and self.game_state == GameState.PLAYING:
-                text_color = SUCCESS_COLOR
-                if player_name == self.username:
-                    indicator_text += " ← Your turn!"
-                else:
-                    indicator_text += " ← Their turn"
-            else:
-                text_color = TEXT_COLOR
-            
-            text = font_medium.render(indicator_text, True, text_color)
-            
-            # Draw colored circle next to player name
-            circle_x = 20
-            circle_y = y_offset + i * 30 + 10
-            pygame.draw.circle(self.screen, color, (circle_x, circle_y), 12)
-            pygame.draw.circle(self.screen, BORDER_COLOR, (circle_x, circle_y), 12, 2)
-            
-            self.screen.blit(text, (45, y_offset + i * 30))
-        
-        # Status message
-        if self.message_timer > 0:
-            status_color = SUCCESS_COLOR if "wins" in self.status_message or "Started" in self.status_message else TEXT_COLOR
-            if "disconnected" in self.status_message:
-                status_color = ERROR_COLOR
-            
-            status_text = font_medium.render(self.status_message, True, status_color)
-            status_rect = status_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 40))
-            self.screen.blit(status_text, status_rect)
-            self.message_timer -= 1
-        
-        # Instructions
-        if self.game_state == GameState.PLAYING:
-            if self.current_player == self.player_number:
-                instruction = "Click a column to drop your piece"
-            else:
-                instruction = "Waiting for opponent's move..."
-        else:  # GAME_OVER
-            instruction = "Press R to reset game or ESC to return to lobby"
-        
-        instruction_text = font_small.render(instruction, True, TEXT_COLOR)
-        instruction_rect = instruction_text.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 15))
-        self.screen.blit(instruction_text, instruction_rect)
-
-    def handle_click(self, mouse_x):
-        """Handle mouse click"""
-        if self.game_state != GameState.PLAYING:
-            return
-        
-        if self.current_player != self.player_number:
-            return  # Not our turn
-        
-        col = self.get_column_from_mouse(mouse_x)
-        if col != -1 and self.is_valid_move(col):
-            # Only send to server, don't make move locally
-            self.send_move(col)
-
-    def run(self):
-        """Main game loop"""
-        while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 1:  # Left click
-                        self.handle_click(event.pos[0])
-                
-                elif event.type == pygame.MOUSEMOTION:
-                    # Update hover column only if it's our turn
-                    if self.game_state == GameState.PLAYING and self.current_player == self.player_number:
-                        self.hover_col = self.get_column_from_mouse(event.pos[0])
-                    else:
-                        self.hover_col = -1
-                
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r:
-                        if self.game_state == GameState.GAME_OVER:
-                            self.send_game_reset()
-                    
-                    elif event.key == pygame.K_ESCAPE:
-                        # Send player left game message to server
-                        leave_game_message = {
-                            "Command": "player_left_game",
-                            "room_name": self.room_name,
-                            "username": self.username
-                        }
-                        try:
-                            data = pickle.dumps(leave_game_message)
-                            self.client_socket.sendall(data)
-                        except Exception as e:
-                            print(f"Error sending leave game message: {e}")
-                            # Return to lobby
-                            self.running = False
-                                        
-            # Clear screen
-            self.screen.fill(DARK_BG)
-            
-            # Draw game elements
-            self.draw_board()
-            self.draw_dropping_piece()
-            self.draw_ui()
-            
-            # Update display
-            pygame.display.flip()
-            self.clock.tick(60)
-        
-        pygame.quit()
-
-def main(client_socket, username, list_of_users_in_room, room_name, player_assignment=None):
-    """Main function to start the Connect 4 game"""
-    print(f"Starting Connect 4 game for {username} in room {room_name}")
-    print(f"Players: {list_of_users_in_room}")
-    print(f"Player assignment: {player_assignment}")
+def main(client_socket, username, players_list, room_name, player_assignment):
+    """Main function to start the networked Connect 4 game"""
+    # Create and show the game window
+    game = NetworkedConnect4Game(client_socket, username, players_list, room_name, player_assignment)
+    game.show()
     
-    game = Connect4Game(client_socket, username, list_of_users_in_room, room_name, player_assignment)
-    game.run()
+    # Return the game instance so it stays alive
+    return game
 
 if __name__ == "__main__":
-    # For testing purposes
-    print("This module should be imported and called from the main client")
+    # This won't be called in the networked version, but kept for compatibility
+    print("This is the networked version of Connect 4. Please run through the client.")

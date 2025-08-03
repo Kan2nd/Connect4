@@ -18,6 +18,7 @@ class MessageEvent(QEvent):
 class GameLobby(QMainWindow):  
     def __init__(self, current_user, room_name, list_of_users, client_socket):
         super().__init__()  
+        self.game_instance = None  # Store game instance
         self.current_user = current_user 
         self.room_name = room_name
         self.list_of_users_in_room = [user for user in (list_of_users or []) if isinstance(user, str)]
@@ -473,7 +474,7 @@ class GameLobby(QMainWindow):
         # Update ready summary
         ready_count = len(self.ready_players)
         total_count = len(self.list_of_users_in_room)
-        time.sleep(0.5)  # Simulate processing delay for UI update
+        
         if ready_count == total_count and total_count == 2:
             self.ready_summary.setText("🎮 Both players ready! Starting Connect 4...")
             self.ready_summary.setStyleSheet("""
@@ -487,20 +488,16 @@ class GameLobby(QMainWindow):
                     border: 2px solid #27ae60;
                 }
             """)
-            print("AUTO START CONNECT 4 GAME")
-            self.chat_display.append("🎮 <b style='color: #27ae60;'>CONNECT 4 STARTING AUTOMATICALLY!</b>")
+            print("Both players ready - starting game")
+            self.chat_display.append("🎮 <b style='color: #27ae60;'>CONNECT 4 STARTING!</b>")
             
-            # Auto-start the game when both players are ready
-            send_start_game = {
-                "Command": "Auto_Start_Game",
-                "Room_Name": self.room_name,
-                "User_Name": self.current_user
-            }
-            try:
-                data = pickle.dumps(send_start_game)
-                client_menu.client_socket.sendall(data)
-            except Exception as e:
-                self.chat_display.append(f"<span style='color: #e74c3c;'>❌ Error auto-starting game: {e}</span>")
+            # Process app events to ensure UI updates before starting game
+            QApplication.processEvents()
+            
+            # Small delay to ensure UI is fully updated
+            import time
+            time.sleep(0.1)
+            
         elif total_count < 2:
             self.ready_summary.setText(f"⏳ Need 2 players ({total_count}/2)")
             self.ready_summary.setStyleSheet("""
@@ -664,17 +661,11 @@ class GameLobby(QMainWindow):
             except:
                 pass
         event.accept()
-#
-#
-#
-#
-#
-#
-#
+
+
 class GameMainMenu(QMainWindow):
     def __init__(self, host, port):
         super().__init__()
-        self.game_running = False  # Track if the game is running
         self.host = host
         self.port = port
         self.list_of_users_in_room = None
@@ -686,6 +677,7 @@ class GameMainMenu(QMainWindow):
         self.running = True
         self.is_disconnected = False
         self.alreadyinroom = False
+        self.game_instance = None  # Add this line
         self.init_ui()
     
     def init_ui(self):
@@ -1145,15 +1137,19 @@ class GameMainMenu(QMainWindow):
                     self.disconnect()
                     break
                 message = pickle.loads(data)
-                if message:
-                    if message["Command"] in ["Join_Room", "Sending_Message", "Player_Ready","Game_State_Update"]:
-                        QCoreApplication.postEvent(self, MessageEvent("chat", message))
-                    elif message["Command"] in ["Room_State", "Check_Username"]:
-                        QCoreApplication.postEvent(self, MessageEvent("rooms", message))
-                    elif message["Command"] == "Game_Started":
-                        QCoreApplication.postEvent(self, MessageEvent("start_game",message))
-                    else:
-                        QCoreApplication.postEvent(self, MessageEvent("status", f"Unknown command received: {message['Command']}"))
+                if message["Command"] in ["Join_Room", "Sending_Message", "Player_Ready","Game_State_Update"]:
+                    QCoreApplication.postEvent(self, MessageEvent("chat", message))
+                elif message["Command"] in ["Room_State", "Check_Username"]:
+                    QCoreApplication.postEvent(self, MessageEvent("rooms", message))
+                elif message["Command"] == "Game_Started":
+                    QCoreApplication.postEvent(self, MessageEvent("start_game",message))
+                elif message["Command"] in ["game_move", "turn_update", "game_reset", "game_won", "game_draw", "game_ended_player_left"]:
+                    # Route game messages to the active game instance
+                    if self.game_instance:
+                        from game import GameMessageEvent
+                        QCoreApplication.postEvent(self.game_instance, GameMessageEvent("game_message", message))
+                else:
+                    QCoreApplication.postEvent(self, MessageEvent("status", f"Unknown command received: {message['Command']}"))
             except socket.error as e:
                 if self.running and e.errno == errno.WSAEWOULDBLOCK:
                     continue
@@ -1176,51 +1172,48 @@ class GameMainMenu(QMainWindow):
     # Start the game with the received message
     def start_game(self, message):
         print(f"Game started with message:", message)
-        # Set game running state to True
-        self.game_running = True        
         
-        # Send game running state to server  
-        game_state_message = {
-            "Command": "Game_State_Update",
-            "Room_Name": self.room_name,
-            "User_Name": self.username,
-            "Game_Running": True
-        }
         try:
-            data = pickle.dumps(game_state_message)
-            client_menu.client_socket.sendall(data)
-        except Exception as e:
-            print(f"Error sending game state: {e}")
-        
-        # Start the actual Connect 4 game
-        try:
-            from game import main
-            # Pass player assignment from server
+            from game import main  # Make sure this matches your actual filename
             player_assignment = message.get("Player_Assignment", {})
-            main(self.client_socket, self.username, self.list_of_users_in_room, self.room_name, player_assignment)
+            
+            # Store the game instance to keep it alive
+            self.game_instance = main(self.client_socket, self.username, self.list_of_users_in_room, self.room_name, player_assignment)
+            
+            # Connect the game's close event to handle cleanup
+            if self.game_instance:
+                original_close_event = self.game_instance.closeEvent
+                def custom_close_event(event):
+                    # Call original close event first
+                    original_close_event(event)
+                    
+                    # Then handle our cleanup
+                    self.send_message({
+                        "Command": "Game_State_Update", 
+                        "Room_Name": self.room_name,
+                        "User_Name": self.username,
+                        "Game_Running": False
+                    })
+                    
+                    # Update lobby when returning
+                    if self.chatroom and self.chatroom.room_name == self.room_name:
+                        self.chatroom.update_players_display()
+                        self.chatroom.chat_display.append("<span style='color: #f39c12;'>🔄 Returned to lobby from game</span>")
+                    
+                    # Clear the game instance
+                    self.game_instance = None
+                
+                self.game_instance.closeEvent = custom_close_event
+                
         except Exception as e:
             print(f"Error starting game: {e}")
-        
-        # After game ends, set game running to False
-        self.game_running = False
-        
-        # Send game end state to server
-        game_end_message = {
-            "Command": "Game_State_Update", 
-            "Room_Name": self.room_name,
-            "User_Name": self.username,
-            "Game_Running": False
-        }
-        try:
-            data = pickle.dumps(game_end_message)
-            client_menu.client_socket.sendall(data)
-        except Exception as e:
-            print(f"Error sending game end state: {e}")
-        
-        # Update the lobby display when returning from game
-        if self.chatroom and self.chatroom.room_name == self.room_name:
-            self.chatroom.update_players_display()
-            self.chatroom.chat_display.append("<span style='color: #f39c12;'>🔄 Returned to lobby from game</span>")
+            # If game fails to start, send game ended message
+            self.send_message({
+                "Command": "Game_State_Update", 
+                "Room_Name": self.room_name,
+                "User_Name": self.username,
+                "Game_Running": False
+            })
         
         
     def process_chat_update(self, message):
