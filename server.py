@@ -96,6 +96,7 @@ class ChatServer:
         self.rooms = {}   # Dictionary to store room names and their users
         self.ready_users = {}  # Dictionary to store ready status by room
         self.games = {}   # Dictionary to store active games by room
+        self.running = True  # Add this flag
         self.init_server()
 
     def init_server(self):
@@ -115,13 +116,18 @@ class ChatServer:
 
     def accept_connections(self):
         """Accept incoming client connections in a separate thread."""
-        while True:
+        while self.running:  # Change from 'while True'
             try:
+                self.server_socket.settimeout(1.0)  # Add timeout
                 client_socket, addr = self.server_socket.accept()
                 print(f"New connection from {addr}")
                 threading.Thread(target=self.handle_client, args=(client_socket, addr)).start()
+            except socket.timeout:
+                continue  # Expected timeout, just continue
             except Exception as e:
-                print(f"Error accepting connection: {e}")
+                if self.running:  # Only print error if still running
+                    print(f"Error accepting connection: {e}")
+                break
 
     def handle_client(self, client_socket, addr):
         """Handle communication with a connected client."""
@@ -357,7 +363,14 @@ class ChatServer:
                 },
                 "Game_State": game.get_game_state()
             })
-            
+            #
+            #
+            #
+            #
+            #
+            #
+            #
+            #
             # If game is over, send game over message
             if game.game_over:
                 self.broadcast_to_room(room_name, {
@@ -417,11 +430,17 @@ class ChatServer:
 
     def shutdown(self):
         """Shutdown the server and close all connections."""
+        print("Shutting down server...")
+        self.running = False  # Set flag to stop threads
+        
+        # Close all client connections
         for client_socket in self.clients.values():
             try:
                 client_socket.close()
             except:
                 pass
+        
+        # Close server socket
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -434,6 +453,5 @@ if __name__ == "__main__":
         while True:
             pass
     except KeyboardInterrupt:
-        print("Shutting down server...")
-        server.shutdown()
+        server.shutdown()  # Call shutdown method
         sys.exit(0)

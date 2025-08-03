@@ -126,10 +126,10 @@ class Connect4GameUI:
                 color = (150, 0, 0)
         else:
             if self.winner == self.parent.current_user:
-                text = "You won! Press Y to restart"
+                text = "You won!"
                 color = (0, 150, 0)
             else:
-                text = f"{self.winner} won! Press Y to restart"
+                text = f"{self.winner} won!"
                 color = (150, 0, 0)
         
         text_surface = self.font.render(text, True, color)
@@ -179,6 +179,7 @@ class Connect4GameUI:
     def close(self):
         """Close the game window"""
         self.running = False
+        
         try:
             pygame.quit()
         except:
@@ -354,13 +355,8 @@ class New_game_room(QMainWindow):
         for user in self.list_of_users_in_room:
             ready_status = " (Ready)" if self.ready_users.get(user, False) else ""
             self.user_list.addItem(f"{user}{ready_status}")
-
-    def toggle_ready(self):
-        """Toggle ready status"""
-        current_ready = self.ready_users.get(self.current_user, False)
-        new_ready = not current_ready
-        
-        # Update button appearance
+            
+    def changing_color(self,new_ready):
         if new_ready:
             self.ready_button.setText("Not Ready")
             self.ready_button.setStyleSheet("""
@@ -399,7 +395,15 @@ class New_game_room(QMainWindow):
                     background-color: #1e7e34;
                 }
             """)
+    def toggle_ready(self):
+        """Toggle ready status"""
+        current_ready = self.ready_users.get(self.current_user, False)
+        new_ready = not current_ready
         
+        # Update button appearance
+        self.changing_color(new_ready)
+        
+
         # Send ready status to server
         if client_menu.client_socket:
             message = {
@@ -453,7 +457,7 @@ class New_game_room(QMainWindow):
     def handle_game_start(self, game_state):
         """Handle game start from server"""
         self.text_edit.append("Connect 4 game starting!")
-        
+        self.ready_button.setEnabled(False)
         # Create and start game UI
         self.game_ui = Connect4GameUI(self)
         self.game_ui.start_game(game_state)
@@ -473,7 +477,24 @@ class New_game_room(QMainWindow):
     def handle_game_over(self, winner, game_state):
         """Handle game over from server"""
         self.text_edit.append(f"Game Over! Winner: {winner}")
+        self.ready_button.setEnabled(True)
         
+        #New sending message here to reshow the ready after game over
+    
+        current_ready = self.ready_users.get(self.current_user, False)
+        message = {
+                "Command": "Ready_Status",
+                "Room_Name": self.room_name,
+                "User_Name": self.current_user,
+                "Ready": not current_ready
+            }
+        try:
+            data = pickle.dumps(message)
+            client_menu.client_socket.sendall(data)
+        except Exception as e:
+            self.text_edit.append(f"Error sending ready status: {e}")
+        # Update the ready button color to match the new state
+        self.changing_color(not current_ready)
         if self.game_ui:
             self.game_ui.update_game_state(game_state)
 
